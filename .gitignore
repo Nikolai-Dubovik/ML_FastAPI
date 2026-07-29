@@ -11,6 +11,8 @@ __pycache__/
 
 # ML-артефакты (генерируются при обучении)
 *.joblib
+training_history.json
+artifacts/
 
 # macOS
 .DS_Store

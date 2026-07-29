@@ -1,0 +1,13 @@
+# что не нужно в build-контексте образа
+.venv/
+venv/
+env/
+.git/
+.idea/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.joblib
+training_history.json
+.DS_Store
+homework_tasks/
