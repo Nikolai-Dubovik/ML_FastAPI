@@ -1,36 +1,29 @@
 import pytest
-from sklearn.pipeline import Pipeline
 
-from model import build_pipeline, predict_churn, train_churn_model
+from model import build_model, predict_churn, train_churn_model
 from models import FeatureVectorChurn
 
 
-def test_build_pipeline_has_preprocessor_and_classifier():
-    pipeline = build_pipeline("random_forest", {"n_estimators": 10})
-
-    assert isinstance(pipeline, Pipeline)
-    assert [name for name, _ in pipeline.steps] == ["preprocessor", "classifier"]
-    assert pipeline.named_steps["classifier"].n_estimators == 10
-
-
-def test_train_churn_model_returns_metrics(sample_df):
-    pipeline, metrics = train_churn_model(sample_df, "logreg", test_size=0.25)
-
-    assert isinstance(pipeline, Pipeline)
-    # точные значения зависят от данных фикстуры — проверяем диапазон, а не число
+def test_train_returns_metrics(synthetic_df):
+    _, metrics = train_churn_model(synthetic_df)
     for name in ("accuracy", "f1", "roc_auc"):
         assert 0.0 <= metrics[name] <= 1.0
-    assert metrics["n_train_rows"] + metrics["n_test_rows"] == len(sample_df)
+    assert metrics["n_train_rows"] + metrics["n_test_rows"] == len(synthetic_df)
+    # в синтетике заложен сигнал, поэтому ранжирование заметно лучше случайного;
+    # заодно ловит расчёт roc_auc по меткам вместо вероятностей (там выходит ~0.67)
+    assert metrics["roc_auc"] > 0.75
 
 
-def test_predict_churn_returns_response_per_row(sample_df, features):
-    pipeline, _ = train_churn_model(sample_df, "logreg", test_size=0.25)
-    batch = [FeatureVectorChurn(**features), FeatureVectorChurn(**{**features, "region": "asia"})]
-
-    responses = predict_churn(pipeline, batch)
-
-    assert len(responses) == len(batch)
+def test_predict_shape_and_probabilities(synthetic_df):
+    pipeline, _ = train_churn_model(synthetic_df)
+    rows = synthetic_df.drop(columns=["churn"]).head(2).to_dict(orient="records")
+    responses = predict_churn(pipeline, [FeatureVectorChurn(**row) for row in rows])
+    assert len(responses) == 2
     for response in responses:
         assert response.prediction in (0, 1)
-        assert set(response.probabilities) == {"0", "1"}
-        assert sum(response.probabilities.values()) == pytest.approx(1.0, abs=1e-3)
+        assert round(sum(response.probabilities.values()), 4) == 1.0
+
+
+def test_unknown_model_type():
+    with pytest.raises(ValueError):
+        build_model("нет такой", {})

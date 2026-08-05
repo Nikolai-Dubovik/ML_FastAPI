@@ -1,23 +1,8 @@
-"""Единственное место, где живут пути и настройки сервиса."""
-
-import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent   # .../homework/14_day/app
-DAY_DIR = BASE_DIR.parent                    # .../homework/14_day
-
-APP_TITLE = "ML Churn Service"
-
-# путь к данным считаем по репозиторию только если переменной нет: в контейнере
-# такой структуры каталогов не существует
-_env_data_path = os.getenv("CHURN_DATA_PATH")
-DATA_PATH = (
-    Path(_env_data_path)
-    if _env_data_path
-    else BASE_DIR.parents[2] / "data" / "churn_dataset.csv"
-)
-
-# артефакты обучения: модель и журнал обучений
-ARTIFACTS_DIR = Path(os.getenv("CHURN_ARTIFACTS_DIR", DAY_DIR / "artifacts"))
+BASE_DIR = Path(__file__).resolve().parent.parent  # homework/14_day
+DATA_PATH = BASE_DIR.parents[1] / "data" / "churn_dataset.csv"
+ARTIFACTS_DIR = BASE_DIR / "artifacts"
 MODEL_PATH = ARTIFACTS_DIR / "churn_model.joblib"
+# журнал лежит рядом с артефактом модели, но независим от него
 HISTORY_PATH = ARTIFACTS_DIR / "training_history.json"

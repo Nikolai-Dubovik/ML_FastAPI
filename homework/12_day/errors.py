@@ -1,31 +1,59 @@
-class ChurnError(Exception):
-    """Базовая доменная ошибка сервиса: несёт HTTP-статус, код и детали."""
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
-    status_code = 500
-    code = "internal_error"
-
-    def __init__(self, message: str, details: dict | list | str | None = None):
-        super().__init__(message)
-        self.message = message
-        self.details = details
+# именно из starlette: иначе 404 от самого фреймворка пройдут мимо обработчика
+from starlette.exceptions import HTTPException
 
 
-class ModelNotTrainedError(ChurnError):
-    """Запрос корректен, но модель ещё не обучена — конфликт состояния."""
+class ApiError(HTTPException):
+    """HTTPException с машиночитаемым кодом ошибки."""
 
-    status_code = 409
-    code = "model_not_trained"
-
-
-class EmptyDatasetError(ChurnError):
-    """Датасет не загружен или пуст — обучать не на чем."""
-
-    status_code = 400
-    code = "empty_dataset"
+    def __init__(self, status_code: int, code: str, message: str):
+        super().__init__(status_code=status_code, detail=message)
+        self.code = code
 
 
-class TrainingError(ChurnError):
-    """Обучение не удалось: обычно плохой тип модели или гиперпараметр."""
+def error_response(
+    status_code: int, code: str, message: str, details: list | None = None
+) -> JSONResponse:
+    """Единственное место, где зашит формат ошибки: code / message / details."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message, "details": details or []}},
+    )
 
-    status_code = 400
-    code = "training_failed"
+
+def error_example(code: str, message: str) -> dict:
+    """Пример ошибки для responses={...} в Swagger."""
+    return {"content": {"application/json": {"example": {
+        "error": {"code": code, "message": message, "details": []},
+    }}}}
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    """Регистрирует глобальные обработчики — клиент всегда получает единый формат."""
+
+    @app.exception_handler(HTTPException)
+    def handle_http_error(request, exc: HTTPException):
+        # у чужих HTTPException (404 от FastAPI) поля code нет
+        return error_response(exc.status_code, getattr(exc, "code", "http_error"), exc.detail)
+
+    @app.exception_handler(RequestValidationError)
+    def handle_validation_error(request, exc: RequestValidationError):
+        # loc[1:] — отбрасываем первый элемент "body", остаётся имя поля
+        details = [
+            {"field": ".".join(str(p) for p in e["loc"][1:]), "message": e["msg"]}
+            for e in exc.errors()
+        ]
+        return error_response(422, "validation_error", "некорректные входные данные", details)
+
+    @app.exception_handler(ValueError)
+    @app.exception_handler(TypeError)
+    def handle_data_error(request, exc: Exception):
+        # сюда попадают ошибки pandas/sklearn при подготовке данных, обучении и предсказании
+        return error_response(400, "data_error", f"ошибка обработки данных: {exc}")
+
+    @app.exception_handler(Exception)
+    def handle_internal_error(request, exc: Exception):
+        return error_response(500, "internal_error", "внутренняя ошибка сервиса")

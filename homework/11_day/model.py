@@ -49,12 +49,11 @@ def train_churn_model(
     pipeline = build_pipeline(model_type, hyperparameters)
     pipeline.fit(X_train, y_train)
     y_pred = pipeline.predict(X_test)
-    # roc_auc считается по вероятности класса 1, а не по меткам: он не зависит
-    # от порога и честнее accuracy при дисбалансе классов (~20% оттока)
-    y_proba = pipeline.predict_proba(X_test)[:, 1]
+    y_proba = pipeline.predict_proba(X_test)[:, 1]  # вероятность класса «уйдёт»
     metrics = {
         "accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
         "f1": round(float(f1_score(y_test, y_pred)), 4),
+        # roc_auc считается по вероятностям, а не по меткам
         "roc_auc": round(float(roc_auc_score(y_test, y_proba)), 4),
         "n_train_rows": int(len(X_train)),
         "n_test_rows": int(len(X_test)),

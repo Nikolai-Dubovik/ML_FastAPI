@@ -1,10 +1,5 @@
-"""Пакет churn-сервиса.
+import logging
 
-Логи настраиваем здесь: импорт любого модуля `app.*` сначала выполняет этот
-файл, поэтому события старта (загрузка датасета, чтение модели) уже попадают
-в лог в нашем формате.
-"""
-
-from app.logging_config import setup_logging
-
-setup_logging()
+# настройка логов одна на всё приложение и до первого сообщения:
+# __init__.py пакета выполняется раньше любого его модуля
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

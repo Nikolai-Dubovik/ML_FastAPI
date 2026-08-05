@@ -1,57 +1,40 @@
+import importlib
+
+import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api
+from app import config, state
 from app.main import app
-from app.ml import history, storage
-
-FEATURES_EXAMPLE = {
-    "monthly_fee": 9.99,
-    "usage_hours": 30.0,
-    "support_requests": 0,
-    "account_age_months": 36,
-    "failed_payments": 0,
-    "region": "europe",
-    "device_type": "desktop",
-    "payment_method": "card",
-    "autopay_enabled": 1,
-}
-
-
-@pytest.fixture(autouse=True)
-def isolate(tmp_path, monkeypatch):
-    """Каждый тест стартует с чистого состояния и пишет артефакты во временный каталог."""
-    monkeypatch.setattr(storage, "MODEL_PATH", tmp_path / "churn_model.joblib")
-    monkeypatch.setattr(history, "HISTORY_PATH", tmp_path / "training_history.json")
-    # app.api грузит модель при импорте — сбрасываем, чтобы «модель не обучена» было честным
-    monkeypatch.setattr(api, "model_state", None)
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
-
-
-@pytest.fixture
-def features():
-    return dict(FEATURES_EXAMPLE)
-
-
-@pytest.fixture
-def sample_df():
-    """Маленький синтетический датасет: быстрый, воспроизводимый, с обоими классами."""
-    n = 40
+def synthetic_df():
+    """Воспроизводимый датасет того же формата, что churn_dataset.csv: 200 строк, ~20% оттока."""
+    rng = np.random.default_rng(42)
+    n = 200
+    churn = (rng.random(n) < 0.2).astype(int)
     return pd.DataFrame({
-        "monthly_fee": [9.99, 19.99] * (n // 2),
-        "usage_hours": [30.0, 5.0] * (n // 2),
-        "support_requests": [0, 3] * (n // 2),
-        "account_age_months": [36, 2] * (n // 2),
-        "failed_payments": [0, 2] * (n // 2),
-        "autopay_enabled": [1, 0] * (n // 2),
-        "region": ["europe", "asia"] * (n // 2),
-        "device_type": ["desktop", "mobile"] * (n // 2),
-        "payment_method": ["card", "paypal"] * (n // 2),
-        # оба класса представлены с запасом — иначе stratify не разложит их в train и test
-        "churn": [0, 0, 0, 1] * (n // 4),
+        "monthly_fee": rng.choice([9.99, 19.99, 29.99], n),
+        # у ушедших клиентов меньше активность и больше проблем с оплатой — модели есть что учить
+        "usage_hours": (rng.normal(30, 8, n) - churn * 10).round(2),
+        "support_requests": rng.integers(0, 5, n) + churn,
+        "account_age_months": rng.integers(1, 48, n),
+        "failed_payments": rng.integers(0, 3, n) + churn,
+        "region": rng.choice(["africa", "america", "asia", "europe"], n),
+        "device_type": rng.choice(["desktop", "mobile", "tablet"], n),
+        "payment_method": rng.choice(["card", "crypto", "paypal"], n),
+        "autopay_enabled": rng.integers(0, 2, n),
+        "churn": churn,
     })
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    """TestClient на приложении с чистым состоянием и артефактами во временной папке."""
+    monkeypatch.setattr(config, "MODEL_PATH", tmp_path / "churn_model.joblib")
+    monkeypatch.setattr(config, "HISTORY_PATH", tmp_path / "training_history.json")
+    # state на импорте грузит датасет и модель, поэтому пути патчим до reload
+    importlib.reload(state)
+    return TestClient(app)

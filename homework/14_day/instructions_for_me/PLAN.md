@@ -1,44 +1,49 @@
 # 📝 День 14 — Финальный рефакторинг и документация (план решения)
 
 ## 🎯 Цель
-Завершить сервис: привести код к аккуратной **пакетной структуре**
-(`api` / `ml` / `schemas` / `config` / `main`), убрать лишнее, написать
-полноценный **README проекта** и зафиксировать итог в git.
+Собрать всё, что построено за 13 дней, в аккуратный проект: разложить код
+по пакетам (`api`, `ml`, `schemas`, `config`, `main`), вычистить то, что
+перестало использоваться, написать README для человека со стороны,
+прогнать тесты и зафиксировать результат в git.
 
-Это капстоун дней 1–13: поведение не меняем — наводим порядок и оформляем.
+Функциональность **не меняется**: те же эндпоинты, тот же формат ошибок,
+те же метрики.
 
 ---
 
-## 📂 Целевая структура `homework/14_day/`
+## 📂 Структура `homework/14_day/`
 
 ```
 homework/14_day/
 ├── app/
-│   ├── __init__.py
-│   ├── main.py              # создание app, логирование, обработчики, include_router
-│   ├── api.py              # APIRouter со всеми эндпоинтами (api)
-│   ├── config.py           # пути и настройки из env (core/config)
-│   ├── schemas.py          # Pydantic-модели (schemas): бывший models.py
-│   ├── errors.py           # доменные исключения
-│   ├── logging_config.py   # setup_logging()
+│   ├── __init__.py          # настройка логирования (до импорта модулей)
+│   ├── config.py            # пути и константы проекта
+│   ├── schemas.py           # Pydantic-модели (бывший models.py)
+│   ├── errors.py            # формат ошибок и глобальные обработчики
+│   ├── state.py             # датасет и текущая модель (состояние сервиса)
+│   ├── api.py               # APIRouter: все эндпоинты
+│   ├── main.py              # сборка приложения FastAPI
 │   └── ml/
 │       ├── __init__.py
-│       ├── dataset.py
-│       ├── preprocessing.py
-│       ├── model.py
-│       ├── storage.py
-│       └── history.py
-├── tests/                  # тесты дня 12, импорты обновлены на app.*
-├── artifacts/              # churn_model.joblib + training_history.json (генерируются)
-├── Dockerfile              # CMD → app.main:app
-├── .dockerignore
+│       ├── dataset.py       # загрузка CSV
+│       ├── preprocessing.py # признаки, сплит, схема
+│       ├── model.py         # pipeline, обучение, предсказание
+│       ├── storage.py       # сохранение/загрузка модели
+│       └── history.py       # журнал обучений
+├── tests/                   # тесты дня 12–13 с новыми импортами
+├── conftest.py
 ├── pytest.ini
-├── README.md               # ПОЛНОЦЕННЫЙ README проекта (deliverable дня)
+├── Dockerfile
+├── README.md                # 📖 README проекта (пункт 3 задания)
 └── instructions_for_me/
     ├── PLAN.md
-    ├── README.md
+    ├── README.md            # как проверять день 14
     └── TECHNOLOGIES.md
 ```
+
+Соответствие пункту 1 задания: `api` → `app/api.py`, `ml` → `app/ml/`,
+`schemas` → `app/schemas.py`, `config` → `app/config.py`, `main` →
+`app/main.py`.
 
 **Новых зависимостей нет.**
 
@@ -46,156 +51,195 @@ homework/14_day/
 
 ## ⚙️ Как будет работать решение
 
-### Перенос модулей (карта миграции)
-| Было (день 13) | Стало (день 14) |
-|---|---|
-| `dataset/preprocessing/model/storage/history.py` | `app/ml/*.py` |
-| `models.py` (Pydantic) | `app/schemas.py` (устраняем путаницу с папкой артефактов) |
-| `errors.py`, `logging_config.py` | `app/errors.py`, `app/logging_config.py` |
-| `main.py` (app + эндпоинты) | `app/main.py` (app) + `app/api.py` (роуты) |
-| разбросанные `Path(__file__)...` | `app/config.py` (единые пути) |
-| `models/` (артефакты) | `artifacts/` |
+### 1. `app/config.py` — все пути в одном месте
 
-### `app/config.py` — единые настройки
-Все пути в одном месте, с переопределением через env (для Docker):
 ```python
-import os
-from pathlib import Path
-
-BASE_DIR = Path(__file__).resolve().parent          # .../14_day/app
-PROJECT_ROOT = BASE_DIR.parents[2]                   # корень репозитория
-
-DATA_PATH = Path(os.getenv("CHURN_DATA_PATH", PROJECT_ROOT / "data" / "churn_dataset.csv"))
-ARTIFACTS_DIR = Path(os.getenv("CHURN_ARTIFACTS_DIR", BASE_DIR.parent / "artifacts"))
+BASE_DIR = Path(__file__).resolve().parent.parent            # homework/14_day
+DATA_PATH = BASE_DIR.parents[1] / "data" / "churn_dataset.csv"
+ARTIFACTS_DIR = BASE_DIR / "artifacts"
 MODEL_PATH = ARTIFACTS_DIR / "churn_model.joblib"
 HISTORY_PATH = ARTIFACTS_DIR / "training_history.json"
 ```
-`dataset.py`/`storage.py`/`history.py` берут пути отсюда, а не считают сами.
 
-### `app/api.py` — роуты через APIRouter
-Эндпоинты переезжают из `main.py` в роутер:
+Артефакты переезжают из `models/` в `artifacts/`: имя `models` спорило с
+модулем моделей, а `artifacts/` уже перечислен в `.gitignore`.
+
+> ⚠️ Модули импортируют **сам config**, а не константы из него:
+> `from app import config` + `config.MODEL_PATH`. При
+> `from app.config import MODEL_PATH` имя копируется в модуль при импорте,
+> и подмена пути в тестах перестаёт работать — та же ловушка, что со
+> значениями по умолчанию в дне 12.
+
+### 2. `app/state.py` — состояние сервиса
+
 ```python
-from fastapi import APIRouter
+dataset = ChurnDataset()
+model_state: dict | None = load_churn_model()
+```
+
+Раньше это жило в `main.py` вместе с эндпоинтами и требовало `global` в
+обработчике обучения. Теперь состояние — отдельный модуль, а эндпоинты
+обращаются к нему через `state.model_state` и присваивают
+`state.model_state = ...`. Плюс для тестов: чтобы сбросить сервис в
+исходное положение, достаточно перезагрузить **один** модуль.
+
+### 3. `app/api.py` — эндпоинты на `APIRouter`
+
+```python
 router = APIRouter()
 
-@router.post("/predict")
-def predict(...): ...
 @router.get("/health")
-def health(): ...
+def health():
+    ...
 ```
-`app/main.py` только собирает приложение:
-```python
-from fastapi import FastAPI
-from app.api import router
-from app.errors import register_error_handlers
-from app.logging_config import setup_logging
 
-setup_logging()
+`APIRouter` — «переносной» набор маршрутов: он объявляется отдельно от
+приложения и подключается к нему одной строкой. Так эндпоинты перестают
+зависеть от объекта `app`, и их можно тестировать и переиспользовать.
+
+### 4. `app/main.py` — сборка приложения
+
+```python
 app = FastAPI(title="ML Churn Service")
 register_error_handlers(app)
 app.include_router(router)
 ```
 
-### Уборка (пункт 2 задания)
-- убрать мёртвый код и дубли, оставшиеся от копий день-в-день;
-- убрать поясняющие «учебные» комментарии, где код уже говорит сам за себя;
-- проверить импорты (не осталось `from dataset import ...` — теперь
-  `from app.ml.dataset import ...`).
+Всё. Ни состояния, ни логики — только сборка.
 
-### README проекта (пункт 3) — скелет
-Отдельный `homework/14_day/README.md` (не путать с этим
-`instructions_for_me/README.md`):
-```markdown
-# ML Churn Service
-Назначение: REST-сервис на FastAPI, предсказывает отток клиента (churn).
+### 5. `app/__init__.py` — настройка логов
 
-## Датасет
-data/churn_dataset.csv — 2000 строк. Признаки: monthly_fee, usage_hours,
-support_requests, account_age_months, failed_payments, autopay_enabled
-(числовые); region, device_type, payment_method (категориальные);
-цель — churn (0/1).
-
-## Запуск локально
-uvicorn app.main:app --reload  (из homework/14_day/)
-
-## Запуск в Docker
-docker build -f homework/14_day/Dockerfile -t churn-service .
-docker run --rm -p 8000:8000 churn-service
-
-## Эндпоинты
-/health, /model/schema, /model/train, /model/status, /model/metrics, /predict, ...
-
-## Примеры запросов
-POST /model/train {"model_type": "random_forest"}
-POST /predict {...признаки...} → {"prediction": 0, "probabilities": {...}}
-
-## Тесты
-pytest -q
+```python
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 ```
+
+Почему здесь, а не в `main.py`: `__init__.py` пакета выполняется **до**
+любого его модуля. Если оставить настройку в `app/main.py`, то к моменту
+её вызова импорт `api` → `state` уже создаст датасет, и лог «датасет
+загружен» потеряется.
+
+### 6. Чистка (пункт 2 задания)
+
+Конкретный список того, что удаляется — не «поискать что-нибудь», а
+проверенные находки:
+
+| Что | Почему |
+|---|---|
+| `ChurnDataset.to_rows()` | мёртвый код: не вызывается ни одним эндпоинтом (проверено `grep`) |
+| необязательность `df` в `feature_schema(df=None)` и ветка `if df is not None` | вызывающий всегда передаёт датасет |
+| `.get("model_type")` / `.get("hyperparameters")` в `/model/status` | страховка под старые bundle дней 6–7, которых больше нет |
+| комментарий «каталог артефактов models/ — не путать с модулем models.py» | после переименования в `artifacts/` и `schemas.py` конфликта нет |
+| `global model_state` в обучении | состояние переехало в `state.py` |
+
+Остальные комментарии оставляем: они объясняют неочевидное (ловушки
+`handle_unknown="ignore"`, `protected_namespaces=()`, порядок фильтра и
+среза).
+
+### 7. Тесты и Docker
+
+Тесты дня 13 переносятся как есть, меняются только импорты
+(`from app.ml.preprocessing import ...`) и фикстура `client`: подмена
+`config.MODEL_PATH` / `config.HISTORY_PATH` → `importlib.reload(state)` →
+`TestClient(app)`. Ожидаем те же 12 зелёных тестов.
+
+`Dockerfile` меняется в двух строках: копируется пакет `app/`, команда
+запуска — `uvicorn app.main:app`.
+
+### 8. README проекта (пункт 3 задания)
+
+`homework/14_day/README.md` — документация сервиса для человека со
+стороны: цель, формат `churn_dataset.csv` (10 колонок с типами и
+допустимыми значениями), запуск локально и в Docker, примеры запросов к
+`/model/train` и `/predict` с ответами, таблица эндпоинтов, структура
+проекта. Пишется на этапе документации, после проверки кода.
+
+### 9. Git (пункт 5 задания)
+
+Финальный коммит фиксирует состояние всех дней. Выполняется **последним**,
+после зелёных тестов и написанного README.
 
 ---
 
 ## 🪜 Пошаговый план реализации
 
-1. Скопировать файлы дня 13 в `homework/14_day/`.
-2. Создать пакет `app/` с `__init__.py`; перенести модули по карте миграции.
-3. Создать `app/config.py`, перевести пути в `dataset/storage/history` на него.
-4. Вынести эндпоинты в `app/api.py` (APIRouter); `app/main.py` — только сборка.
-5. Обновить **все** импорты на `app.*`; удалить мёртвый код и лишние комментарии.
-6. Обновить `Dockerfile` (CMD → `app.main:app`, COPY путей) и `pytest.ini`.
-7. Обновить импорты в `tests/` на `app.*`; прогнать `pytest -q` до зелёного.
-8. Написать `README.md` проекта.
-9. Зафиксировать в git (`git add` + `git commit`).
+1. Создать `homework/14_day/` и разложить код дня 13 по пакетам
+   (`app/`, `app/ml/`), переименовав `models.py` → `schemas.py`.
+2. Вынести пути в `app/config.py`, состояние — в `app/state.py`,
+   эндпоинты — в `app/api.py` на `APIRouter`, сборку — в `app/main.py`,
+   настройку логов — в `app/__init__.py`.
+3. Выполнить чистку по таблице выше.
+4. Обновить импорты в тестах и фикстуру `client` в `conftest.py`.
+5. Обновить `Dockerfile` (пакет `app/`, `uvicorn app.main:app`).
+6. Прогнать `pytest -q` → 12 passed; поднять uvicorn и проверить
+   эндпоинты; собрать и запустить контейнер.
+7. Написать README проекта.
+8. Зафиксировать в git.
 
 ---
 
 ## ✅ Критерии готовности (Definition of Done)
 
-- [ ] структура разложена по `app/` (`api`, `ml`, `schemas`, `config`, `main`);
-- [ ] нет мёртвого кода и лишних «учебных» комментариев;
-- [ ] все импорты обновлены на `app.*`, приложение стартует
-      `uvicorn app.main:app`;
-- [ ] пути (данные/артефакты) централизованы в `config.py`;
-- [ ] `README.md` проекта описывает цель, датасет, запуск (локально+Docker),
-      примеры запросов;
-- [ ] `pytest -q` — все тесты зелёные (импорты в тестах обновлены);
-- [ ] `docker build`/`run` работают с новой структурой;
-- [ ] итог зафиксирован в git-коммите.
+- [ ] структура содержит `api`, `ml`, `schemas`, `config`, `main`;
+- [ ] `app/main.py` не содержит ни состояния, ни бизнес-логики;
+- [ ] мёртвый код из таблицы чистки удалён;
+- [ ] артефакты пишутся в `artifacts/`, а не в `models/`;
+- [ ] `pytest -q` → 12 passed;
+- [ ] `uvicorn app.main:app` поднимается, все эндпоинты дней 1–13 отвечают
+      как раньше;
+- [ ] логи старта («датасет загружен: 2000 строк») не потерялись;
+- [ ] образ собирается и контейнер отвечает на `/health` и `/docs`;
+- [ ] `README.md` описывает цель, датасет, запуск и примеры запросов;
+- [ ] итоговое состояние зафиксировано в git.
 
 ---
 
 ## 🧪 Чем проверять
-- `uvicorn app.main:app --reload` из `homework/14_day/` → все эндпоинты дней
-  1–13 отвечают (schema/train/status/metrics/predict/health).
-- `pytest -q` → `N passed`.
-- `docker build -f homework/14_day/Dockerfile -t churn-service .` и
-  `docker run --rm -p 8000:8000 churn-service` → `/health` и `/docs` доступны.
-- README открывается и по нему можно поднять проект с нуля.
-- `git log --oneline -1` → финальный коммит на месте.
+
+```bash
+cd homework/14_day
+pytest -q
+uvicorn app.main:app --reload
+
+curl http://127.0.0.1:8000/health
+curl -X POST http://127.0.0.1:8000/model/train
+curl http://127.0.0.1:8000/model/metrics
+curl -X POST http://127.0.0.1:8000/predict -H "Content-Type: application/json" -d '{...}'
+
+# из корня репозитория
+docker build -f homework/14_day/Dockerfile -t churn-day14 .
+docker run --rm -d -p 8014:8000 --name churn churn-day14
+curl http://127.0.0.1:8014/health
+docker stop churn
+```
+
+Отдельно: после `pytest` в папке дня **не появилась** `artifacts/`.
 
 ---
 
 ## ⚠️ Возможные подводные камни
-- **`__init__.py`**: без них `app/` и `app/ml/` — не пакеты, импорт `app.ml...`
-  не сработает.
-- **Забытый импорт**: после переноса легко пропустить `from dataset import ...`.
-  Прогони `grep -rn "import" app/ tests/` и убедись, что всё через `app.*`.
-- **Точка входа сменилась**: теперь `app.main:app` — обнови и команду uvicorn,
-  и `CMD` в Dockerfile, и (если есть) импорт `from main import app` в тестах на
-  `from app.main import app`.
-- **Пути артефактов переехали**: старый `models/churn_model.joblib` новая
-  структура не подхватит — на свежем старте `/health` = `degraded`, просто
-  обучи заново. `artifacts/` добавь в `.gitignore` (или храни только `.gitkeep`).
-- **Рефакторинг ≠ переписывание**: цель — переложить код, не менять поведение;
-  тесты дня 12 — страховка, что ничего не сломалось.
-- **Два README**: `instructions_for_me/README.md` — твои заметки по запуску
-  дня; `README.md` в корне дня — документация проекта для других. Не смешивать.
+
+- **`from app.config import MODEL_PATH` ломает тесты.** Импортировать
+  модуль, а не константу, иначе `monkeypatch` не подействует (та же
+  природа, что у значений по умолчанию в дне 12).
+- **Настройка логов должна опережать импорты.** В `app/__init__.py`, а не
+  в `app/main.py`, иначе логи старта теряются.
+- **`importlib.reload` перезагружает модуль на месте** — объект модуля
+  остаётся тем же, поэтому все, кто держит `from app import state`,
+  увидят обновлённое состояние. Именно поэтому состояние вынесено в
+  отдельный модуль: перезагружать `main` или `api` пришлось бы каскадом.
+- **Пути в Docker.** `BASE_DIR.parents[1]` требует, чтобы в образе
+  сохранилась структура `/app/homework/14_day/` и `/app/data/` — как в
+  дне 13.
+- **Не «чистить» ради чистки.** Удаляем только проверенно неиспользуемое;
+  комментарии, объясняющие ловушки, — часть учебной ценности кода.
+- **Тесты после рефакторинга — главный критерий.** Если после переноса
+  файлов 12 тестов зелёные и живой сервис отвечает, рефакторинг
+  состоялся.
 
 ---
 
-## 🔮 Что дальше (курс завершён 🎉)
-Сервис готов: предобработка, обучение, метрики, история, ошибки, тесты,
-логи, health-check, Docker и документация. Куда расти дальше: CI (гонять
-`pytest` на каждый push), аутентификация эндпоинтов, вынос артефактов в
-хранилище/model registry, улучшение самой модели (борьба с дисбалансом —
-`class_weight`, подбор порога), деплой контейнера в облако.
+## 🔮 Что дальше
+Курс закончен: сервис умеет обучаться, предсказывать, объяснять свои
+ошибки, вести журнал экспериментов, проверяться тестами и запускаться в
+контейнере. Дальше — по интересам: очередь задач для обучения, версии
+моделей, метрики Prometheus, CI на GitHub Actions.

@@ -43,15 +43,3 @@ class TrainingConfigChurn(BaseModel):
 
     model_type: Literal["logreg", "random_forest"] = "logreg"
     hyperparameters: dict = Field(default_factory=dict)
-
-
-class ErrorDetail(BaseModel):
-    code: str                        # машиночитаемый код: model_not_trained, validation_error, ...
-    message: str                     # человекочитаемое пояснение
-    details: dict | list | str | None = None  # доп. информация или null
-
-
-class ErrorResponse(BaseModel):
-    """Единый формат любой ошибки сервиса (используется и в /docs)."""
-
-    error: ErrorDetail

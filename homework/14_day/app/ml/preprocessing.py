@@ -53,7 +53,7 @@ def features_to_dataframe(features: list[FeatureVectorChurn]) -> pd.DataFrame:
     return pd.DataFrame([f.model_dump() for f in features], columns=FEATURE_COLUMNS)
 
 
-def feature_schema(df: pd.DataFrame | None = None) -> dict:
+def feature_schema(df: pd.DataFrame) -> dict:
     """Контракт признаков: имена, типы (из Pydantic-модели) и роли.
 
     Для категориальных признаков добавляет допустимые значения из датасета.
@@ -66,7 +66,7 @@ def feature_schema(df: pd.DataFrame | None = None) -> dict:
             "type": fields[name].annotation.__name__,
             "role": "numeric" if name in NUMERIC_FEATURES else "categorical",
         }
-        if df is not None and name in CATEGORICAL_FEATURES:
+        if name in CATEGORICAL_FEATURES:
             item["categories"] = sorted(str(v) for v in df[name].unique())
         features.append(item)
     return {"features": features, "target": TARGET_COLUMN}

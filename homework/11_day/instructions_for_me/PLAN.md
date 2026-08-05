@@ -1,9 +1,10 @@
-# 📝 День 11 — Метрики и история обучений churn-модели (план решения)
+# 📝 День 11 — Метрики и история обучений churn модели (план решения)
 
 ## 🎯 Цель
-Начать **отслеживать качество** модели во времени: добавить метрику
-`roc_auc`, сохранять запись о каждом обучении в историю (JSON-файл) и отдавать
-её через новый `GET /model/metrics`, чтобы сравнивать разные настройки модели.
+Научиться сравнивать настройки модели: добавить метрику `roc_auc`,
+записывать каждое обучение в журнал (JSON-файл) и отдавать его через
+`GET /model/metrics`. После этого вопрос «какая конфигурация лучше?»
+решается одним запросом, а не памятью и скриншотами консоли.
 
 Продолжаем приложение дней 1–10 (все прежние эндпоинты остаются).
 
@@ -13,130 +14,176 @@
 
 ```
 homework/11_day/
-├── main.py                  # + GET /model/metrics; train пишет в историю
-├── history.py               # НОВЫЙ: чтение/дозапись истории обучений (JSON)
-├── model.py                 # + roc_auc в метриках
-├── models.py                # без изменений
-├── preprocessing.py         # без изменений
-├── dataset.py               # без изменений
-├── storage.py               # без изменений
+├── main.py                  # + запись в журнал при обучении, + GET /model/metrics
+├── history.py               # НОВЫЙ модуль: JSON-журнал обучений
+├── model.py                 # + метрика roc_auc
 ├── errors.py                # без изменений
+├── models.py                # без изменений
+├── dataset.py               # без изменений
+├── preprocessing.py         # без изменений
+├── storage.py               # без изменений
 └── instructions_for_me/
     ├── PLAN.md
     ├── README.md
     └── TECHNOLOGIES.md
 ```
 
-**Новых зависимостей нет** (`json`, `datetime` — из стандартной библиотеки;
-`roc_auc_score` — из уже установленного sklearn).
+**Новых зависимостей нет** (`json` — стандартная библиотека,
+`roc_auc_score` — из уже установленного scikit-learn).
 
 ---
 
 ## ⚙️ Как будет работать решение
 
-### `model.py` — метрика `roc_auc`
-`train_churn_model` уже считает accuracy/f1 на test. Добавляем `roc_auc` по
-вероятностям положительного класса:
+### 1. `model.py` — метрика `roc_auc`
+
+`accuracy` и `f1` считаются по предсказанным меткам, `roc_auc` — по
+**вероятностям** положительного класса:
+
 ```python
-proba = pipeline.predict_proba(X_test)[:, 1]
-metrics["roc_auc"] = round(float(roc_auc_score(y_test, proba)), 4)
+y_proba = pipeline.predict_proba(X_test)[:, 1]   # столбец класса 1
+"roc_auc": round(float(roc_auc_score(y_test, y_proba)), 4),
 ```
-`roc_auc` честнее accuracy на несбалансированных классах (~20% оттока): не
-зависит от порога и от того, что модель может «выигрывать», предсказывая всем
-класс 0.
 
-### `history.py` — журнал обучений (JSON-файл)
-Простое персистентное хранилище — список записей в
-`models/training_history.json`. Одна запись = один запуск train:
+Зачем ещё одна метрика: классы несбалансированы (~20% оттока), и
+`accuracy` 0.7875 у модели, которая почти никого не относит к оттоку,
+выглядит обманчиво хорошо. `roc_auc` показывает, умеет ли модель хотя бы
+**ранжировать** клиентов по риску.
+
+### 2. `history.py` — журнал обучений
+
+Простейшее хранилище: список записей в JSON-файле
+`models/training_history.json` (рядом с артефактом модели).
+
 ```python
-{"timestamp": "2026-...Z", "model_type": "logreg",
- "hyperparameters": {}, "metrics": {"accuracy":..., "f1":..., "roc_auc":...}}
+HISTORY_PATH = Path(__file__).resolve().parent / "models" / "training_history.json"
+
+def load_history(path: Path = HISTORY_PATH) -> list[dict]:
+    """Читает журнал; пустой список, если файла ещё нет."""
+
+def append_record(record: dict, path: Path = HISTORY_PATH) -> None:
+    """Дописывает запись в конец журнала."""
 ```
-Функции:
-- `append_record(record)` — прочитать список, добавить запись, записать назад;
-- `load_history()` — вернуть список записей (пустой, если файла нет).
 
-Файл выбран (а не только память), чтобы история **пережила рестарт** — так же
-как модель хранится в joblib.
+Одна запись — ровно то, что требует задание:
 
-### `main.py`
-- `POST /model/train`: после сохранения модели формируем запись
-  (`timestamp` берём из bundle — `trained_at`) и вызываем `append_record`.
-- `GET /model/metrics?model_type=&limit=5`:
-  ```python
-  history = load_history()
-  if model_type: history = [r for r in history if r["model_type"] == model_type]
-  return {"last": history[-1] if history else None, "history": history[-limit:]}
-  ```
-  `last` — метрики последнего обучения, `history` — несколько последних
-  записей; `model_type` фильтрует, `limit` ограничивает.
+```json
+{
+  "trained_at": "2026-08-05T20:22:49.603060+00:00",
+  "model_type": "logreg",
+  "hyperparameters": {},
+  "metrics": {"accuracy": 0.7875, "f1": 0.0449, "roc_auc": 0.6091,
+              "n_train_rows": 1600, "n_test_rows": 400}
+}
+```
 
-### Сверка с заданием
-| Пункт задания | Как закрываем |
-|---|---|
-| структура хранения истории | `models/training_history.json` + `history.py` |
-| запись при каждом train (timestamp/тип/гиперпараметры/метрики) | `append_record` в `/model/train` |
-| accuracy / f1 / roc_auc | добавили `roc_auc` в `train_churn_model` |
-| `GET /model/metrics`: последнее + список | эндпоинт с `last` + `history` |
-| фильтрация по типу модели | query-параметр `model_type` |
-| сравнение настроек | history разных прогонов рядом |
+Файл, а не память: журнал должен переживать перезапуск сервиса — иначе
+сравнивать вчерашние запуски с сегодняшними не выйдет.
+
+### 3. `main.py`
+
+**В `POST /model/train`** — после сохранения модели дописываем запись:
+
+```python
+append_record({
+    "trained_at": model_state["trained_at"],
+    "model_type": config.model_type,
+    "hyperparameters": config.hyperparameters,
+    "metrics": metrics,
+})
+```
+
+**Новый `GET /model/metrics`** с двумя необязательными параметрами:
+
+```python
+@app.get("/model/metrics")
+def model_metrics(limit: int = 5, model_type: str | None = None):
+    history = load_history()
+    if model_type:
+        history = [r for r in history if r["model_type"] == model_type]
+    if not history:
+        raise ApiError(409, "model_not_trained", "модель ещё не обучалась — вызовите POST /model/train")
+    return {"last": history[-1], "history": history[-limit:]}
+```
+
+- `last` — метрики последнего обучения (пункт 3 задания);
+- `history` — последние `limit` записей (пункт 3, «по желанию»);
+- `model_type` — фильтр по типу модели (пункт 4);
+- пустой журнал → ошибка дня 10 в едином формате, отдельного формата не
+  изобретаем.
 
 ---
 
 ## 🪜 Пошаговый план реализации
 
 1. Скопировать файлы дня 10 в `homework/11_day/`.
-2. В `model.py` добавить `roc_auc` (через `predict_proba` + `roc_auc_score`).
-3. Создать `history.py`: `append_record()` и `load_history()` поверх JSON.
-4. В `main.py` в `/model/train` дозаписывать запись в историю.
-5. Добавить `GET /model/metrics` с параметрами `model_type` и `limit`.
-6. Прогнать несколько обучений с разными настройками и сравнить метрики.
+2. В `model.py` добавить `roc_auc` в метрики (`roc_auc_score` по
+   `predict_proba(...)[:, 1]`).
+3. Создать `history.py`: `HISTORY_PATH`, `load_history()`,
+   `append_record()`.
+4. В `main.py`: запись в журнал в конце `/model/train` и новый эндпоинт
+   `GET /model/metrics`.
+5. Проверить: обучить logreg → обучить random_forest → сравнить их по
+   `roc_auc` через `/model/metrics`, в том числе с фильтром.
 
 ---
 
 ## ✅ Критерии готовности (Definition of Done)
 
-- [ ] метрики обучения содержат `accuracy`, `f1`, `roc_auc`;
-- [ ] каждый `POST /model/train` добавляет запись в
-      `models/training_history.json`;
-- [ ] запись хранит timestamp, тип модели, гиперпараметры и метрики;
-- [ ] история переживает рестарт сервера (читается из файла);
-- [ ] `GET /model/metrics` возвращает `last` и `history`;
-- [ ] `?model_type=random_forest` фильтрует, `?limit=N` ограничивает список;
-- [ ] эндпоинты прошлых дней и формат ошибок дня 10 работают.
+- [ ] `POST /model/train` возвращает метрики с `roc_auc`;
+- [ ] после каждого обучения в `models/training_history.json` появляется
+      новая запись с `trained_at`, `model_type`, `hyperparameters`,
+      `metrics`;
+- [ ] журнал переживает перезапуск сервера (записи не теряются);
+- [ ] `GET /model/metrics` возвращает `last` (последнее обучение) и
+      `history` (последние `limit` записей, по умолчанию 5);
+- [ ] `GET /model/metrics?model_type=random_forest` отдаёт только записи
+      этого типа;
+- [ ] `GET /model/metrics` на пустом журнале → 409 `model_not_trained` в
+      формате дня 10;
+- [ ] по журналу видно, какая конфигурация дала лучший `roc_auc`;
+- [ ] эндпоинты прошлых дней работают, обработка ошибок не сломалась.
 
 ---
 
 ## 🧪 Чем проверять
-- `POST /model/train` (logreg) → `metrics` с `roc_auc ≈ 0.6091`.
-- `POST /model/train` c `random_forest` → `f1 ≈ 0.1748`, `roc_auc ≈ 0.5881`.
-- `POST /model/train` c `random_forest` и `{"n_estimators":200,"max_depth":5}`
-  → `accuracy ≈ 0.7975`, `roc_auc ≈ 0.6243` (лучший roc_auc из трёх).
-- `GET /model/metrics` → `last` = последнее обучение, `history` = 3 записи.
-- `GET /model/metrics?model_type=random_forest` → только rf-записи.
-- Рестарт сервера → `GET /model/metrics` всё ещё видит прошлые записи.
+
+Сравнение конфигураций — сценарий пункта 5 задания:
+
+| Шаг | Ожидаем |
+|---|---|
+| `POST /model/train` `{}` (logreg) | `roc_auc` ≈ 0.61 |
+| `POST /model/train` `{"model_type": "random_forest"}` | `roc_auc` ≈ 0.59 |
+| `POST /model/train` `{"model_type": "random_forest", "hyperparameters": {"n_estimators": 300, "max_depth": 5}}` | своя строка в журнале |
+| `GET /model/metrics` | `last` — последнее обучение, `history` — три записи |
+| `GET /model/metrics?model_type=random_forest` | только записи random_forest |
+| `GET /model/metrics?limit=1` | одна последняя запись |
+| рестарт сервера → `GET /model/metrics` | журнал на месте |
 
 ---
 
 ## ⚠️ Возможные подводные камни
-- **`roc_auc` требует вероятностей**: считаем по `predict_proba(...)[:, 1]`
-  (вероятность класса 1), а не по `predict`. Обе наши модели умеют
-  `predict_proba`.
-- **Оба класса в test**: `roc_auc_score` упадёт, если в test один класс — у
-  нас спасает `stratify=y`, оба класса есть всегда.
-- **Дозапись, а не перезапись**: `append_record` читает существующий список
-  и добавляет — иначе история затрётся при каждом обучении.
-- **Файла ещё нет**: `load_history()` должен вернуть `[]`, если файл
-  отсутствует (первый запуск).
-- **git**: добавь `training_history.json` в `.gitignore` (как и `*.joblib`) —
-  это генерируемый артефакт, не исходник.
-- **Ключи JSON** гиперпараметров/метрик — строки; числа сериализуются как
-  есть, `round(...)` уже сделан в `model.py`.
+
+- **`roc_auc_score` считается по вероятностям, а не по меткам.** Передать
+  `y_pred` вместо `predict_proba(...)[:, 1]` — типичная ошибка: цифра
+  получится, но заниженная и бессмысленная.
+- **Столбец `[:, 1]`** — вероятность класса «уйдёт». Порядок столбцов
+  задаёт `pipeline.classes_` (у нас `[0, 1]`, поэтому индекс 1 верен).
+- **Журнал ≠ артефакт модели.** `storage.py` хранит одну (последнюю)
+  модель, `history.py` — все запуски. Не смешивать: перезапись модели не
+  должна стирать историю.
+- **Читать перед записью.** `append_record()` каждый раз загружает файл
+  целиком и пишет обратно — для учебного объёма это нормально и проще
+  всего.
+- **Фильтр раньше среза:** сначала отобрать по `model_type`, потом взять
+  `[-limit:]`, иначе фильтр применится к «хвосту» и отдаст меньше записей,
+  чем есть.
+- **409 при фильтре без совпадений** — если по типу модели записей нет,
+  ответ тот же `model_not_trained`. Для учебного сервиса это допустимо,
+  отдельный код не заводим.
 
 ---
 
 ## 🔮 Что дальше (день 12)
-Логика разрослась: предобработка, обучение, метрики, история, обработка
-ошибок. Пора зафиксировать поведение тестами. День 12 настроит `pytest`,
-добавит юнит-тесты функций и интеграционные тесты через `TestClient`
-(train → status → predict + сценарии ошибок).
+Сервис оброс логикой (ошибки, журнал, метрики) — пора закрепить поведение
+тестами: день 12 добавит pytest и httpx, тесты API и предобработки.

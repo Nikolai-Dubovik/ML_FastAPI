@@ -1,28 +1,25 @@
 import logging
-from pathlib import Path
 
 import pandas as pd
 
-from app.config import DATA_PATH
+from app import config
 from app.schemas import DatasetRowChurn
 
-logger = logging.getLogger("churn.dataset")
+logger = logging.getLogger(__name__)
 
 
 class ChurnDataset:
     """Загружает churn-датасет и даёт удобный доступ к нему."""
 
-    def __init__(self, csv_path: Path | None = None):
-        self.csv_path = Path(csv_path or DATA_PATH)
-        self.df: pd.DataFrame = pd.read_csv(self.csv_path)
-        logger.info(
-            "датасет загружен: %d строк, %d колонок (%s)",
-            self.df.shape[0], self.df.shape[1], self.csv_path,
-        )
+    def __init__(self):
+        # храним данные в pandas DataFrame
+        self.df: pd.DataFrame = pd.read_csv(config.DATA_PATH)
+        logger.info("датасет загружен: %s строк", len(self.df))
 
     def preview(self, n: int = 5) -> list[DatasetRowChurn]:
         """Первые n строк датасета как валидированные объекты DatasetRowChurn."""
-        return [DatasetRowChurn(**row) for row in self.df.head(n).to_dict(orient="records")]
+        records = self.df.head(n).to_dict(orient="records")
+        return [DatasetRowChurn(**row) for row in records]
 
     def info(self) -> dict:
         """Сводка по датасету: размеры, признаки, распределение churn."""

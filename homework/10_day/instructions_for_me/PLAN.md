@@ -1,10 +1,10 @@
-# 📝 День 10 — Обработка ошибок в churn-сервисе (план решения)
+# 📝 День 10 — Обработка ошибок в churn сервисе (план решения)
 
 ## 🎯 Цель
-Сделать сервис устойчивым к плохим данным и предсказуемым для клиента:
-любая ошибка возвращается в **едином JSON-формате** `code / message /
-details` с правильным HTTP-статусом, вместо технических трассировок и
-разнобоя (то 422 от Pydantic, то 400 от нас, то 500 от sklearn).
+Сделать так, чтобы **любая** ошибка сервиса возвращалась клиенту в одном и
+том же аккуратном JSON-формате `code / message / details`, а не в виде
+пёстрой смеси: 422 от Pydantic, `{"detail": "..."}` от нас и технической
+трассировки sklearn с кодом 500.
 
 Продолжаем приложение дней 1–9 (все прежние эндпоинты остаются).
 
@@ -14,12 +14,12 @@ details` с правильным HTTP-статусом, вместо техни�
 
 ```
 homework/10_day/
-├── main.py                  # + регистрация глобальных обработчиков ошибок
-├── errors.py                # НОВЫЙ: доменные исключения + модель ошибки
-├── models.py                # + ErrorResponse (формат ошибки для /docs)
-├── model.py                 # train/predict бросают доменные исключения
-├── preprocessing.py         # без изменений
+├── main.py                  # регистрация обработчиков + ApiError вместо HTTPException
+├── errors.py                # НОВЫЙ модуль: формат ошибки и глобальные обработчики
+├── models.py                # без изменений
 ├── dataset.py               # без изменений
+├── preprocessing.py         # без изменений
+├── model.py                 # без изменений
 ├── storage.py               # без изменений
 └── instructions_for_me/
     ├── PLAN.md
@@ -27,130 +27,155 @@ homework/10_day/
     └── TECHNOLOGIES.md
 ```
 
-**Новых зависимостей нет** (используем то, что уже даёт FastAPI/Starlette).
+**Новых зависимостей нет.**
 
 ---
 
 ## ⚙️ Как будет работать решение
 
-### Единый формат ошибки
-Любой сбой отдаётся телом:
+### 1. Единый формат ошибки
+
+Любой ответ с ошибкой — один и тот же JSON:
+
 ```json
-{"error": {"code": "model_not_trained", "message": "...", "details": null}}
+{
+  "error": {
+    "code": "model_not_trained",
+    "message": "модель ещё не обучена — вызовите POST /model/train",
+    "details": []
+  }
+}
 ```
-- **code** — короткий машиночитаемый код (`validation_error`,
-  `model_not_trained`, `empty_dataset`, `training_failed`, `internal_error`);
-- **message** — человекочитаемое пояснение на русском;
-- **details** — доп. информация (список ошибок валидации, текст причины) или
-  `null`.
 
-### `errors.py` — доменные исключения
-Базовый класс несёт всё, что нужно обработчику: HTTP-статус, `code`,
-`message`, `details`.
+- `code` — машиночитаемый идентификатор (по нему клиент ветвит логику);
+- `message` — человекочитаемое описание;
+- `details` — список уточнений (для валидации — по полю на запись),
+  в простых случаях пустой список.
+
+### 2. `errors.py`
+
+Три небольшие вещи:
+
+**`ApiError`** — наше исключение, это `HTTPException` + поле `code`:
 ```python
-class ChurnError(Exception):
-    status_code = 500
-    code = "internal_error"
-    def __init__(self, message: str, details=None):
-        self.message = message
-        self.details = details
-
-class ModelNotTrainedError(ChurnError):  # 409 — конфликт состояния
-    status_code = 409; code = "model_not_trained"
-
-class EmptyDatasetError(ChurnError):     # 400 — нарушена предпосылка
-    status_code = 400; code = "empty_dataset"
-
-class TrainingError(ChurnError):         # 400 — плохой конфиг от клиента
-    status_code = 400; code = "training_failed"
+class ApiError(HTTPException):
+    def __init__(self, status_code: int, code: str, message: str):
+        super().__init__(status_code=status_code, detail=message)
+        self.code = code
 ```
+Наследуемся, чтобы не плодить второй обработчик: `ApiError` ловится тем же
+хендлером, что и обычный `HTTPException` (например, 404 от FastAPI).
 
-### `main.py` — глобальные обработчики (`@app.exception_handler`)
-Три обработчика ловят ошибки в одной точке, а не в каждом эндпоинте:
+**`error_response(status_code, code, message, details)`** — собирает
+`JSONResponse` в формате выше. Единственное место, где формат зашит в код.
 
-| Обработчик для | code | статус | когда срабатывает |
+**`register_error_handlers(app)`** — регистрирует глобальные обработчики:
+
+| Что ловим | Код HTTP | `code` | Откуда берётся |
 |---|---|---|---|
-| `ChurnError` | из исключения | из исключения | наши доменные ошибки |
-| `RequestValidationError` | `validation_error` | 422 | неверное число/типы признаков |
-| `Exception` (catch-all) | `internal_error` | 500 | всё непредвиденное, без трассировки |
+| `HTTPException` (в т.ч. `ApiError`) | из исключения | `exc.code` (у чужих — `http_error`) | наши `raise`, 404 от FastAPI |
+| `RequestValidationError` | 422 | `validation_error` | Pydantic: не тот тип, нет поля |
+| `ValueError`, `TypeError` | 400 | `data_error` | pandas/sklearn: подготовка данных, обучение, предсказание |
+| `Exception` | 500 | `internal_error` | всё остальное — вместо трассировки |
 
-Каждый обработчик возвращает `JSONResponse` в едином формате.
-`RequestValidationError` разворачиваем в компактный `details.errors`
-(`field / type / message` из `exc.errors()`).
+Обработчик `RequestValidationError` разворачивает `exc.errors()` в
+`details`:
+```python
+details = [
+    {"field": ".".join(str(p) for p in e["loc"][1:]), "message": e["msg"]}
+    for e in exc.errors()
+]
+```
+`loc[1:]` — отбрасываем первый элемент `"body"`, остаётся имя поля.
 
-### Где бросаем доменные исключения
-- `/predict`: нет модели → `ModelNotTrainedError` (было `HTTPException(400)`);
-- `/model/train`: пустой датасет → `EmptyDatasetError`; ошибка sklearn на
-  плохом гиперпараметре → `TrainingError` (было `HTTPException(400)`).
+### 3. `main.py`
 
-### Сверка с заданием
-| Пункт задания | Как закрываем |
-|---|---|
-| общий формат `code/message/details` | `ErrorResponse` + все обработчики |
-| глобальные обработчики HTTP/данных/предсказания | 3 `@app.exception_handler` |
-| неверное количество признаков | `RequestValidationError` → 422 (missing) |
-| неверные типы значений | `RequestValidationError` → 422 (parsing) |
-| пустой датасет | `EmptyDatasetError` → 400 |
-| отсутствие обученной модели | `ModelNotTrainedError` → 409 |
-| примеры ошибок в /docs | `responses={...: ErrorResponse}` у эндпоинтов |
-| аккуратные JSON вместо трассировок | catch-all `Exception` → 500 |
+- вызвать `register_error_handlers(app)` после создания `app`;
+- `HTTPException` → `ApiError` с осмысленным кодом:
+  - модель не обучена → `ApiError(409, "model_not_trained", ...)`
+    (409 Conflict — ресурс есть, но состояние сервиса не позволяет);
+  - датасет пуст → `ApiError(400, "empty_dataset", ...)`;
+- **убрать** `try/except (TypeError, ValueError)` вокруг
+  `train_churn_model()` — эти ошибки теперь ловит глобальный обработчик и
+  отдаёт `400 data_error`. Локальная обработка больше не нужна.
+- в декораторах `/predict` и `/model/train` добавить `responses={...}` с
+  примерами ошибок — они попадут в Swagger (пункт 4 задания).
 
 ---
 
 ## 🪜 Пошаговый план реализации
 
 1. Скопировать файлы дня 9 в `homework/10_day/`.
-2. Создать `errors.py`: `ChurnError` + подклассы.
-3. В `models.py` добавить `ErrorResponse` (для документации).
-4. В `main.py` зарегистрировать три обработчика и вернуть единый JSON.
-5. Заменить `raise HTTPException(...)` на доменные исключения в `/predict`
-   и `/model/train`.
-6. У `/predict` и `/model/train` описать в декораторе `responses` примеры
-   ошибок (409/422/400).
-7. Прогнать сценарии ошибок (см. «Чем проверять»).
+2. Создать `errors.py`: `ApiError`, `error_response()`,
+   `register_error_handlers()`.
+3. В `main.py`: вызвать `register_error_handlers(app)`, заменить
+   `HTTPException` на `ApiError`, удалить локальный `try/except` в
+   `/model/train`.
+4. В `main.py` добавить `responses={...}` с примерами ошибок для
+   `/predict` и `/model/train`.
+5. Проверить все четыре сценария ошибок + успешный сценарий (train →
+   predict), убедиться, что формат ответа везде одинаковый.
 
 ---
 
 ## ✅ Критерии готовности (Definition of Done)
 
-- [ ] есть единый формат `{"error": {"code","message","details"}}`;
-- [ ] `/predict` без модели → 409 `model_not_trained` (не 500, не голый текст);
-- [ ] неверные типы/нехватка полей → 422 `validation_error` с `details.errors`;
-- [ ] плохой гиперпараметр в train → 400 `training_failed` с причиной;
-- [ ] пустой датасет в train → 400 `empty_dataset`;
-- [ ] непредвиденная ошибка → 500 `internal_error` **без трассировки** в теле;
-- [ ] в `/docs` у `/predict` и `/model/train` видны примеры ошибок;
-- [ ] эндпоинты прошлых дней работают, успешные ответы не изменились.
+- [ ] все ошибки сервиса возвращают тело
+      `{"error": {"code": ..., "message": ..., "details": [...]}}`;
+- [ ] `POST /predict` без обученной модели → 409 `model_not_trained`;
+- [ ] `POST /predict` с пропущенным признаком → 422 `validation_error`,
+      в `details` названо недостающее поле;
+- [ ] `POST /predict` со строкой вместо числа → 422 `validation_error` с
+      именем поля;
+- [ ] `POST /model/train` на пустом датасете → 400 `empty_dataset`;
+- [ ] `POST /model/train` с несуществующим гиперпараметром → 400
+      `data_error` (а не 500 с трассировкой);
+- [ ] несуществующий путь (`GET /nope`) → 404 в том же формате;
+- [ ] в теле ответа нет ни одной строки Python-трассировки;
+- [ ] в `/docs` у `/predict` и `/model/train` показаны примеры ошибок;
+- [ ] эндпоинты прошлых дней работают, успешный сценарий не изменился.
 
 ---
 
 ## 🧪 Чем проверять
-- `POST /predict` до обучения → 409 + `code: model_not_trained`.
-- `POST /predict` с `monthly_fee: "abc"` → 422 + `type: float_parsing`.
-- `POST /predict` без поля `region` → 422 + `type: missing`.
-- `POST /model/train` с `hyperparameters: {"not_a_param": 1}` → 400
-  `training_failed`, в `details.reason` — текст sklearn.
-- Успешные `train`/`predict`/`status`/`schema` отвечают как в дне 9.
+
+Пять curl-запросов (точные команды и ожидаемые ответы — в `README.md`):
+
+| Запрос | Ожидаем |
+|---|---|
+| `/predict` до обучения | 409 `model_not_trained` |
+| `/predict` без поля `region` | 422 `validation_error`, `details[0].field == "region"` |
+| `/predict` с `"monthly_fee": "abc"` | 422 `validation_error` |
+| `/model/train` с `{"hyperparameters": {"nonexistent": 1}}` | 400 `data_error` |
+| `GET /nope` | 404 `http_error` |
+
+Пустой датасет проверяем, временно подсунув пустой CSV (или обнулив
+`dataset.df` в консоли) — отдельный эндпоинт для этого не нужен.
 
 ---
 
 ## ⚠️ Возможные подводные камни
-- **Порядок и типы обработчиков**: `RequestValidationError` — отдельный
-  класс из `fastapi.exceptions`, его надо ловить явно, иначе останется
-  дефолтный формат `{"detail": [...]}`.
-- **HTTPException фреймворка** (404 на неизвестный путь, 405) идёт мимо
-  `ChurnError`. Хочешь единый формат и для них — добавь обработчик
-  `StarletteHTTPException` (`from starlette.exceptions import HTTPException`).
-- **Не утечь трассировкой**: catch-all `Exception` отдаёт клиенту только
-  общий текст; подробности — в лог (полноценное логирование будет в дне 13).
-- **Статус 409 vs 400** для «нет модели»: это конфликт состояния (запрос
-  валиден, но сервер к нему не готов) → 409 уместнее 400.
-- **`details` сериализуемы**: кладём строки/списки/словари, а не объекты
-  исключений — иначе JSONResponse упадёт.
+
+- **`HTTPException` из Starlette, не из FastAPI.** Обработчик регистрируем
+  на `starlette.exceptions.HTTPException` — иначе 404, которые генерирует
+  сам фреймворк, пройдут мимо и вернутся в старом формате.
+- **`exc.code` есть не у всех.** У 404 от FastAPI это обычный
+  `HTTPException` без нашего поля → берём `getattr(exc, "code", "http_error")`.
+- **Union-тело `/predict`.** Эндпоинт принимает объект *или* список, и
+  Pydantic на ошибку валидации выдаёт записи по обоим вариантам: в `loc`
+  появится имя варианта (`FeatureVectorChurn.region`) и лишняя ошибка
+  `list_type`. Это не баг — просто в `details` будет больше одной записи.
+- **Обработчик `Exception` не отменяет лог.** В консоли uvicorn трассировка
+  по-прежнему видна — и это правильно: клиент её не получает, а мы отлаживаем.
+- **Порядок в `main.py`:** `register_error_handlers(app)` вызвать сразу
+  после создания `app`, до объявления эндпоинтов.
+- **Не заменять 422 на 400.** Валидация входа — ответственность Pydantic,
+  свои проверки типов писать не нужно, достаточно перехватить готовое
+  исключение.
 
 ---
 
 ## 🔮 Что дальше (день 11)
-Ошибки под контролем — можно спокойно наблюдать за качеством. День 11
-добавит `roc_auc`, историю обучений (JSON-лог записей train) и эндпоинт
-`GET /model/metrics`, чтобы сравнивать настройки модели между собой.
+Ошибки стали предсказуемыми — можно углубиться в качество модели: день 11
+добавит метрику `roc_auc`, журнал обучений (история запусков) и эндпоинт
+`GET /model/metrics`.
